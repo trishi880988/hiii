@@ -21,7 +21,7 @@ users_col = db["users"]
 # Initialize bot
 app = Client("bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# जब user /start भेजे
+# जब कोई user /start भेजे
 @app.on_message(filters.command("start"))
 async def start(client, message: Message):
     user_id = message.from_user.id
@@ -34,7 +34,7 @@ async def start(client, message: Message):
 
     await message.reply("👋 Welcome! Send me a message and I'll forward it to the admin.")
 
-# जब कोई user message भेजे, तो admin को forward करो (हर user के लिए अलग chat)
+# जब कोई user message भेजे, admin को forward करो (हर user के लिए अलग chat)
 @app.on_message(filters.private & ~filters.command("start"))
 async def handle_messages(client, message: Message):
     user_id = message.from_user.id
@@ -42,7 +42,7 @@ async def handle_messages(client, message: Message):
     text = message.text
 
     if user_id == ADMIN_ID:
-        return  # Admin से message नहीं लेना
+        return  # Admin के खुद के messages ignore करो
 
     # Store message in MongoDB
     users_col.update_one(
@@ -52,35 +52,43 @@ async def handle_messages(client, message: Message):
     )
 
     # Admin को user के नाम से अलग chat में message भेजो
-    chat_tag = f"📩 **{username}** (`{user_id}`)\n📝 {text}"
-    await client.send_message(ADMIN_ID, chat_tag)
+    forwarded_msg = await client.send_message(
+        ADMIN_ID, 
+        f"📩 **{username}** (`{user_id}`)\n📝 {text}"
+    )
+
+    # MongoDB में store करो ताकि reply track हो सके
+    users_col.update_one(
+        {"_id": user_id},
+        {"$set": {"last_message_id": forwarded_msg.message_id}}
+    )
 
     await message.reply("✅ Your message has been sent to the admin.")
 
-# Admin जब किसी user को reply करना चाहे
+# ✅ Admin किसी भी user को सीधे reply कर सकता है
 @app.on_message(filters.private & filters.reply & filters.user(ADMIN_ID))
 async def reply_to_user(client, message: Message):
-    if not message.reply_to_message:
+    replied_msg = message.reply_to_message
+    if not replied_msg:
         return await message.reply("❌ Error: Reply to a user's message.")
 
-    # Extract user_id from the forwarded message
-    reply_text = message.text
-    forwarded_message = message.reply_to_message.text
-    user_id_str = forwarded_message.split("(`")[1].split("`)")[0]
-
-    try:
-        user_id = int(user_id_str)  # Convert user_id to integer
-    except ValueError:
-        return await message.reply("❌ Error: Invalid user ID.")
-
-    # Admin का reply सही user को भेजो
-    await client.send_message(user_id, f"👤 **Admin:** {reply_text}")
+    # Extract user_id from the original forwarded message
+    for user in users_col.find():
+        last_msg_id = user.get("last_message_id")
+        if last_msg_id == replied_msg.message_id:
+            user_id = user["_id"]
+            break
+    else:
+        return await message.reply("❌ Error: User not found.")
 
     # Store reply in MongoDB
     users_col.update_one(
         {"_id": user_id},
-        {"$push": {"chat": {"from_admin": reply_text}}}
+        {"$push": {"chat": {"from_admin": message.text}}}
     )
+
+    # Send reply to user
+    await client.send_message(user_id, f"👤 **Admin:** {message.text}")
 
     await message.reply(f"✅ Reply sent to {user_id}!")
 
